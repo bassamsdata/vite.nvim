@@ -8,6 +8,7 @@ M.current_switcher = {
 	buf = nil,
 	win = nil,
 }
+
 local config = {
 	scoring = {
 		-- Weights should add up to 1.0
@@ -98,4 +99,76 @@ local function get_sorted_buffers()
 
 	return buffers
 end
+
+-- Create and show the floating window
+local function create_float_win()
+	local width = config.window.width
+	local height = config.window.height
+
+	-- Calculate position
+	local row = math.floor((vim.o.lines - height) / 2)
+	local col = math.floor((vim.o.columns - width) / 2)
+
+	-- Create buffer for the window
+	local buf = api.nvim_create_buf(false, true)
+
+	-- Window options
+	local win_opts = {
+		relative = "editor",
+		row = row,
+		col = col,
+		width = width,
+		height = height,
+		style = "minimal",
+		border = config.window.border,
+	}
+
+	-- Create window
+	local win = api.nvim_open_win(buf, true, win_opts)
+
+	-- Set window options
+	api.nvim_set_option_value("winblend", 0, { win = win })
+	-- api.nvim_set_option_value("cursorline", true, { win = win })
+
+	return buf, win
+end
+
+local function display_buffers(buf, buffers, current_buf)
+	local lines = {}
+	local key_map = {}
+	local highlights = {}
+	local current_line = nil
+
+	return key_map, buffers, current_line
+end
+
+-- Main function to show buffer switcher
+function M.show_switcher() end
+
+function M.setup(opts)
+	config = vim.tbl_deep_extend("force", config, opts or {})
+
+	vim.g.frecency_debug = opts.debug or false
+
+	local group = api.nvim_create_augroup("FrecencySwitcher", { clear = true })
+
+	-- Track buffer switches
+	api.nvim_create_autocmd("BufEnter", {
+		callback = function() end,
+		group = group,
+	})
+
+	-- Save on focus lost and exit
+	api.nvim_create_autocmd({ "FocusLost", "VimLeavePre" }, {
+		callback = function() end,
+		group = group,
+	})
+
+	-- Handle project changes
+	api.nvim_create_autocmd("DirChanged", {
+		callback = function() end,
+		group = group,
+	})
+end
+
 return M
