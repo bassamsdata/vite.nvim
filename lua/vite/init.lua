@@ -26,6 +26,7 @@ local config = {
 		height = 10,
 		border = "rounded",
 		highlight = "FloatBorder",
+		left_padding = "    ", -- Configure padding here
 	},
 	scoring = {
 		-- Weights should add up to 1.0
@@ -120,6 +121,17 @@ local function cleanup_old_histories()
 			fn.delete(files[i])
 		end
 	end
+end
+
+-- Add buffer deletion function
+local function delete_buffer(buf_id, win_id)
+	-- Try to delete the buffer
+	local success = pcall(api.nvim_buf_delete, buf_id, { force = false })
+	if not success then
+		vim.notify("Cannot delete buffer: Buffer is modified", vim.log.levels.WARN)
+		return false
+	end
+	return true
 end
 
 -- Load history from file
@@ -345,11 +357,42 @@ local function create_float_win()
 	-- Create window
 	local win = api.nvim_open_win(buf, true, win_opts)
 
+	-- Add padding at the top
+	api.nvim_buf_set_lines(buf, 0, 1, false, { "" })
 	-- Set window options
 	api.nvim_set_option_value("winblend", 0, { win = win })
 	-- api.nvim_set_option_value("cursorline", true, { win = win })
 
 	return buf, win
+end
+
+--- Add icon support function
+--- @param file_path string
+--- @return string, string|nil
+local function get_file_icon(file_path)
+	if not config.use_icons then
+		return "", nil
+	end
+
+	-- Try mini.icons first
+	local ok_mini, MiniIcons = pcall(require, "mini.icons")
+	if ok_mini then
+		local icon, hl = MiniIcons.get("file", file_path)
+		return icon .. " ", hl
+	end
+
+	-- Try nvim-web-devicons as fallback
+	local ok_web, devicons = pcall(require, "nvim-web-devicons")
+	if ok_web then
+		local icon, hl = devicons.get_icon(
+			file_path,
+			file_path:match("^.+%.(%w+)$"), -- Get file extension
+			{ default = true }
+		)
+		return icon and (icon .. " ") or "", hl
+	end
+
+	return "", nil
 end
 
 -- Display buffer list with key hints
@@ -362,24 +405,34 @@ local function display_buffers(buf, buffers, current_buf)
 	-- Clear existing highlights
 	vim.api.nvim_buf_clear_namespace(buf, -1, 0, -1)
 
+	-- Add initial empty line for top padding
+	table.insert(lines, "")
+
 	for i, buffer in ipairs(buffers) do
 		local key = i <= #config.keys and config.keys[i] or tostring(i)
-		local modified = buffer.modified and config.modified_icon .. " " or ""
+		local modified = buffer.modified and config.modified_icon or ""
 		local is_current = buffer.id == current_buf
 		-- local prefix = is_current and "→ " or "  "
 		local icon, icon_hl = get_file_icon(buffer.path)
 
+		-- Split the path into filename and directory
+		local filename = vim.fn.fnamemodify(buffer.path, ":t")
+		local dir_path = vim.fn.fnamemodify(buffer.path, ":~:.:h")
+		-- Handle root directory case
+		dir_path = dir_path == "." and " . ./" or " . " .. dir_path .. "/"
 		local score_display = config.show_scores and string.format(" [" .. config.score_format .. "]", buffer.score)
 			or ""
 
 		local display_line = string.format(
-			"%s %s%s%s%s",
-			-- prefix,
+			"%s%s %s%s%s%s%s %s",
+			config.window.left_padding,
 			key,
-			modified,
 			icon,
-			buffer.name,
-			score_display
+			filename,
+			dir_path,
+			score_display,
+			modified ~= "" and " " or "", -- Add space only if modified
+			modified
 		)
 
 		table.insert(lines, display_line)
@@ -387,29 +440,72 @@ local function display_buffers(buf, buffers, current_buf)
 
 		-- Store current buffer line number (1-based index for cursor positioning)
 		if is_current then
-			current_line = i
+			current_line = i + 1 -- +1 for the padding line
 		end
 
-		-- Calculate icon highlight position
-		local icon_start = #key + #modified
+		-- Calculate positions for highlights with left padding
+		local base_col = #config.window.left_padding
+		local key_end = base_col + #key
+		local icon_start = key_end + 1
+		local filename_start = icon_start + #icon
+		local dir_start = filename_start + #filename
+		local score_start = dir_start + #dir_path
+		local modified_start = score_start + #score_display + (#modified > 0 and 1 or 0)
 
 		-- Store highlights for this line
+		local line_idx = i + 1 -- +1 for the padding line
+
+		-- Key number highlight
+		table.insert(highlights, {
+			line = line_idx - 1,
+			hl_group = "CursorLineNr",
+			start_col = base_col,
+			end_col = key_end,
+		})
+		-- Icon highlight
 		if icon_hl then
 			table.insert(highlights, {
-				line = i - 1, -- 0-based index for highlights
+				line = line_idx - 1,
 				hl_group = icon_hl,
 				start_col = icon_start,
 				end_col = icon_start + #icon - 1,
 			})
 		end
 
-		-- Add highlight for current buffer line
+		-- Directory path highlight (including the dot and slash)
+		table.insert(highlights, {
+			line = line_idx - 1,
+			hl_group = "Comment",
+			start_col = dir_start,
+			end_col = score_start,
+		})
+
+		-- Score highlight
+		if #score_display > 0 then
+			table.insert(highlights, {
+				line = line_idx - 1,
+				hl_group = "Special",
+				start_col = score_start,
+				end_col = score_start + #score_display,
+			})
+		end
+		-- Modified icon highlight
+		if #modified > 0 then
+			table.insert(highlights, {
+				line = line_idx - 1,
+				hl_group = "Special",
+				start_col = modified_start,
+				end_col = modified_start + #modified,
+			})
+		end
+
+		-- Current buffer highlight
 		if is_current then
 			table.insert(highlights, {
-				line = i - 1, -- 0-based index for highlights
+				line = line_idx - 1,
 				hl_group = "Title",
-				start_col = 0,
-				end_col = -1,
+				start_col = filename_start,
+				end_col = dir_start,
 			})
 		end
 	end
@@ -425,6 +521,87 @@ local function display_buffers(buf, buffers, current_buf)
 	return key_map, buffers, current_line
 end
 
+-- Add refresh function
+local function refresh_switcher()
+	if not is_switcher_open() then
+		return
+	end
+
+	local buffers = get_sorted_buffers()
+	local _, _, current_line = display_buffers(M.current_switcher.buf, buffers, current_buffer)
+
+	-- Adjust cursor position
+	local cursor = api.nvim_win_get_cursor(M.current_switcher.win)
+	if cursor[1] > #buffers then
+		api.nvim_win_set_cursor(M.current_switcher.win, { #buffers, 1 })
+	elseif current_line then
+		api.nvim_win_set_cursor(M.current_switcher.win, { current_line, 7 }) -- Set to 1st letter of file path
+	end
+end
+
+-- Add this function for help menu
+local function show_help_window()
+	local help_text = {
+		"Keymaps:",
+		"a-g      - Quick select buffers",
+		"<CR>     - Select buffer",
+		"v        - Toggle vertical split mode",
+		"-        - Toggle horizontal split mode",
+		"D        - Delete buffer",
+		"R        - Reset buffer frecency score",
+		"q/Esc    - Close switcher",
+		"g?       - Show this help",
+	}
+
+	-- Create a small floating window
+	local width = 40
+	local height = #help_text
+	local main_win = M.current_switcher.win
+	local main_config = api.nvim_win_get_config(main_win)
+
+	local row = main_config.row + api.nvim_win_get_height(main_win) + 1 -- Add 1 for slight gap
+	local col = main_config.col
+
+	local buf = api.nvim_create_buf(false, true)
+	local win_opts = {
+		relative = "editor",
+		row = row,
+		col = col,
+		width = width,
+		height = height,
+		style = "minimal",
+		border = "rounded",
+	}
+
+	local win = api.nvim_open_win(buf, false, win_opts)
+	api.nvim_buf_set_lines(buf, 0, -1, false, help_text)
+
+	-- Add highlighting
+	for i = 0, #help_text - 1 do
+		if i == 0 then
+			api.nvim_buf_add_highlight(buf, -1, "Title", i, 0, -1)
+		else
+			-- Highlight the keybinding part
+			local dash_pos = help_text[i + 1]:find("-")
+			if dash_pos then
+				api.nvim_buf_add_highlight(buf, -1, "Special", i, 0, dash_pos - 1)
+			end
+		end
+	end
+
+	-- Auto-close help window when main window closes
+	api.nvim_create_autocmd("WinClosed", {
+		buffer = M.current_switcher.buf,
+		callback = function()
+			if api.nvim_win_is_valid(win) then
+				api.nvim_win_close(win, true)
+			end
+		end,
+		once = true,
+	})
+
+	return buf, win
+end
 -- Main function to show buffer switcher
 function M.show_switcher()
 	current_buffer = api.nvim_get_current_buf() -- Save the current buffer ID
@@ -436,17 +613,37 @@ function M.show_switcher()
 
 	local buffers = get_sorted_buffers()
 	local buf, win = create_float_win()
-	local mode = "" -- Track split mode
+	local mode = {
+		vertical = false,
+		horizontal = false,
+	}
+	api.nvim_create_autocmd("CursorMoved", {
+		buffer = buf,
+		callback = function()
+			local cursor = api.nvim_win_get_cursor(win)
+			local fixed_col = #config.window.left_padding + 7 -- This will position after "a  󰢱 "
+			api.nvim_win_set_cursor(win, { cursor[1], fixed_col })
+		end,
+	})
 
 	-- Store current switcher
 	M.current_switcher = { buf = buf, win = win }
 	local key_map, _, current_line = display_buffers(buf, buffers, current_buffer) -- Pass the original buffer ID
 
-	-- Set cursor to current buffer position
-	if current_line then -- NOTE: do we need 1-based indexing here?
+	-- Calculate correct cursor position (after key and icon)
+	local function get_filename_col(line_text)
+		local _, icon_end = line_text:find("^%s*[a-z]%s+[^ ]+ ")
+		return icon_end or 6 -- fallback to 6 if pattern not found
+	end
+	if current_line then
 		vim.schedule(function()
 			if api.nvim_win_is_valid(win) then
-				api.nvim_win_set_cursor(win, { current_line, 7 })
+				local lines = api.nvim_buf_get_lines(buf, current_line - 1, current_line, false)
+				if #lines > 0 then
+					local col = get_filename_col(lines[1])
+					local fixed_col = #config.window.left_padding + 7 -- This will position after "a  󰢱 "
+					api.nvim_win_set_cursor(win, { current_line, fixed_col })
+				end
 			end
 		end)
 	end
@@ -454,8 +651,10 @@ function M.show_switcher()
 	local function clear_echo()
 		vim.api.nvim_echo({ { "" } }, false, {})
 	end
+
 	local function reset_mode()
-		mode = ""
+		mode.vertical = false
+		mode.horizontal = false
 		clear_echo()
 	end
 
@@ -470,9 +669,9 @@ function M.show_switcher()
 		local key_handler = function()
 			clear_echo() -- Clear echo before closing
 			api.nvim_win_close(win, true)
-			if mode == "vertical" then
+			if mode.vertical then
 				vim.cmd("vsplit")
-			elseif mode == "horizontal" then
+			elseif mode.horizontal then
 				vim.cmd("split")
 			end
 			api.nvim_set_current_buf(buffer_id)
@@ -485,20 +684,31 @@ function M.show_switcher()
 		})
 	end
 
-	-- Add mode selection mappings
+	-- Modified split mappings
 	api.nvim_buf_set_keymap(buf, "n", config.split_commands.vertical, "", {
 		callback = function()
-			mode = "vertical"
-			vim.api.nvim_echo({ { " VERTICAL ", "IncSearch" } }, false, {})
+			mode.vertical = not mode.vertical
+			mode.horizontal = false
+			if mode.vertical then
+				vim.api.nvim_echo({ { " VERTICAL ", "IncSearch" } }, false, {})
+			else
+				clear_echo()
+			end
 		end,
 		noremap = true,
 		silent = true,
 	})
 
+	-- Modify horizontal split mapping
 	api.nvim_buf_set_keymap(buf, "n", config.split_commands.horizontal, "", {
 		callback = function()
-			mode = "horizontal"
-			vim.api.nvim_echo({ { " HORIZONTAL ", "IncSearch" } }, false, {})
+			mode.horizontal = not mode.horizontal
+			mode.vertical = false
+			if mode.horizontal then
+				vim.api.nvim_echo({ { " HORIZONTAL ", "IncSearch" } }, false, {})
+			else
+				clear_echo()
+			end
 		end,
 		noremap = true,
 		silent = true,
@@ -507,7 +717,7 @@ function M.show_switcher()
 	api.nvim_buf_set_keymap(buf, "n", config.delete_key, "", {
 		callback = function()
 			local cursor = api.nvim_win_get_cursor(win)
-			local line_num = cursor[1]
+			local line_num = cursor[1] - 1
 			buffers = get_sorted_buffers()
 			if line_num <= #buffers then
 				local buffer_to_delete = buffers[line_num].id
@@ -520,16 +730,17 @@ function M.show_switcher()
 		silent = true,
 	})
 
+	-- Modify the select_key handler
 	api.nvim_buf_set_keymap(buf, "n", config.select_key, "", {
 		callback = function()
 			local cursor = api.nvim_win_get_cursor(win)
-			local line_num = cursor[1]
+			local line_num = cursor[1] - 1
 			if line_num <= #buffers then
 				local buffer_id = buffers[line_num].id
 				api.nvim_win_close(win, true)
-				if mode == "vertical" then
+				if mode.vertical then
 					vim.cmd("vsplit")
-				elseif mode == "horizontal" then
+				elseif mode.horizontal then
 					vim.cmd("split")
 				end
 				api.nvim_set_current_buf(buffer_id)
@@ -539,6 +750,30 @@ function M.show_switcher()
 		silent = true,
 	})
 
+	api.nvim_buf_set_keymap(buf, "n", "R", "", {
+		callback = function()
+			local cursor = api.nvim_win_get_cursor(win)
+			local line_num = cursor[1] - 1
+			buffers = get_sorted_buffers()
+			if line_num <= #buffers then
+				local buffer_path = buffers[line_num].path
+				if reset_buffer_score(buffer_path) then
+					vim.notify("Reset frecency score for " .. buffer_path)
+					refresh_switcher()
+				end
+			end
+		end,
+		noremap = true,
+		silent = true,
+	})
+	-- Add g? mapping for help
+	api.nvim_buf_set_keymap(buf, "n", "g?", "", {
+		callback = function()
+			show_help_window()
+		end,
+		noremap = true,
+		silent = true,
+	})
 	-- Clean up switcher reference when closing
 	api.nvim_buf_set_keymap(buf, "n", "q", "", {
 		callback = function()
@@ -555,13 +790,14 @@ function M.setup(opts)
 	config = vim.tbl_deep_extend("force", config, opts or {})
 
 	vim.g.frecency_debug = opts.debug or false
+	setup_project_paths()
+	load_history()
 
 	local group = api.nvim_create_augroup("FrecencySwitcher", { clear = true })
 
-	-- Track buffer switches
+	-- Track buffer switches - this is where scores are calculated
 	api.nvim_create_autocmd("BufEnter", {
 		callback = function()
-			-- TODO: probably can get args.buf here
 			local current_buf = api.nvim_get_current_buf()
 			if is_valid_buffer(current_buf) then
 				update_history(current_buf)
