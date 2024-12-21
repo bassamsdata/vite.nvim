@@ -1,5 +1,6 @@
 local M = {}
 
+-- M.config = {}
 -- Core state that needs to be accessible across modules
 M.state = {
 	buffer_history = {},
@@ -9,54 +10,57 @@ M.state = {
 	current_switcher = { buf = nil, win = nil },
 }
 
--- Will be populated in setup()
-M.config = {}
+local function measure(name, fn)
+	local start = vim.uv.hrtime()
+	local result = { fn() } -- Capture all return values in a table
+	local duration = (vim.uv.hrtime() - start) / 1000000
+	vim.notify(string.format("History: %s took %.2fms", name, duration))
+	---@diagnostic disable-next-line: deprecated
+	return unpack(result) -- Return all values
+end
+
+-- Track initialization state
+local config = require("vite.config")
+local scoring = require("vite.scoring")
+local history = require("vite.history")
 
 -- Setup function
 function M.setup(opts)
-	-- Load config module
-	local config = require("vite.config")
-	M.config = config.create(opts)
+	M.config = config.create(opts or {})
+	measure("history", function()
+		history.initialize(M.state, M.config)
+	end)
+	measure("scoring", function()
+		scoring.initialize(M.config)
+	end)
 
-	-- Initialize core functionality
-	local history = require("vite.history")
-	local scoring = require("vite.scoring")
-	-- Initialize modules with config
-	history.initialize(M.state, M.config)
-	scoring.initialize(M.config)
+	-- Measure autocommand setup
+	local group = vim.api.nvim_create_augroup("Vite", { clear = true })
 
-	-- Set up autocommands
-	local function create_autocommands()
-		local group = vim.api.nvim_create_augroup("Vite", { clear = true })
+	vim.api.nvim_create_autocmd("BufEnter", {
+		group = group,
+		callback = function(args)
+			if scoring.is_valid_buffer(args.buf) then
+				scoring.update_history(args.buf, M.state)
+			end
+		end,
+	})
 
-		vim.api.nvim_create_autocmd("BufEnter", {
-			group = group,
-			callback = function()
-				local current_buf = vim.api.nvim_get_current_buf()
-				if scoring.is_valid_buffer(current_buf) then
-					scoring.update_history(current_buf, M.state)
-				end
-			end,
-		})
+	vim.api.nvim_create_autocmd({ "FocusLost", "VimLeavePre" }, {
+		group = group,
+		callback = function()
+			history.save_to_file(M.state)
+			history.cleanup_old_histories(M.config)
+		end,
+	})
 
-		vim.api.nvim_create_autocmd({ "FocusLost", "VimLeavePre" }, {
-			group = group,
-			callback = function()
-				history.save_to_file(M.state)
-				history.cleanup_old_histories(M.config)
-			end,
-		})
-
-		vim.api.nvim_create_autocmd("DirChanged", {
-			group = group,
-			callback = function()
-				history.save_to_file(M.state)
-				history.initialize(M.state, M.config)
-			end,
-		})
-	end
-
-	create_autocommands()
+	vim.api.nvim_create_autocmd("DirChanged", {
+		group = group,
+		callback = function()
+			history.save_to_file(M.state)
+			history.initialize(M.state, M.config)
+		end,
+	})
 end
 
 -- Main function to show buffer switcher

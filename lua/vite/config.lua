@@ -9,6 +9,7 @@ local defaults = {
 	select_key = "<CR>",
 	modified_icon = "",
 	delete_key = "D",
+	reset_key = "R",
 	use_icons = true,
 	scoring = {
 		frequency_weight = 0.4,
@@ -20,11 +21,15 @@ local defaults = {
 		height = 10,
 		border = "rounded",
 		highlight = "FloatBorder",
-		left_padding = "    ",
+		left_padding = "",
 	},
 	split_commands = {
 		vertical = "v",
 		horizontal = "-",
+	},
+	ui = {
+		arrow_icon = "❯", -- Can be changed to ▶, ❯, ➜, ⟩, etc.
+		hide_cursor = true,
 	},
 	project = {
 		markers = {

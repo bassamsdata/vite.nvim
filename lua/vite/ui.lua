@@ -4,9 +4,6 @@ local api = vim.api
 local fn = vim.fn
 local scoring = require("vite.scoring")
 
--- Add window/buffer tracking
-local window_stack = {}
-
 -- Add icon support function
 local function get_file_icon(file_path, config)
 	if not config.use_icons then
@@ -70,8 +67,10 @@ local function display_buffers(buf, buffers, current_buf, config)
 	local highlights = {}
 	local current_line = nil
 
+	local arrow_ns = api.nvim_create_namespace("vite_arrow")
 	-- Clear existing highlights
 	api.nvim_buf_clear_namespace(buf, -1, 0, -1)
+	api.nvim_buf_clear_namespace(buf, arrow_ns, 0, -1)
 
 	-- Add initial empty line for top padding
 	table.insert(lines, "")
@@ -90,7 +89,7 @@ local function display_buffers(buf, buffers, current_buf, config)
 			or ""
 
 		local display_line = string.format(
-			"%s%s %s%s%s%s%s %s",
+			"  %s%s %s%s%s%s%s %s", -- Note the two spaces at start for arrow
 			config.window.left_padding,
 			key,
 			icon,
@@ -109,7 +108,7 @@ local function display_buffers(buf, buffers, current_buf, config)
 		end
 
 		-- Calculate positions for highlights
-		local base_col = #config.window.left_padding
+		local base_col = #config.window.left_padding + 2
 		local key_end = base_col + #key
 		local icon_start = key_end + 1
 		local icon_end = icon_start + #icon
@@ -195,18 +194,38 @@ local function display_buffers(buf, buffers, current_buf, config)
 	return key_map, buffers, current_line
 end
 
+local function update_arrow(buf, prev_line, new_line, config)
+	local arrow_ns = api.nvim_create_namespace("vite_arrow")
+
+	-- Clear previous arrow
+	if prev_line then
+		api.nvim_buf_clear_namespace(buf, arrow_ns, prev_line - 1, prev_line)
+	end
+
+	-- Set new arrow
+	if new_line > 0 then
+		api.nvim_buf_set_extmark(buf, arrow_ns, new_line - 1, 0, {
+			virt_text = { { config.ui.arrow_icon, "Special" } },
+			virt_text_pos = "overlay",
+			priority = 100,
+		})
+	end
+end
+
 -- Show help window
 local function show_help_window(main_win, config)
 	local help_text = {
 		"Keymaps:",
 		"a-g      - Quick select buffers",
-		"<CR>     - Select buffer",
-		"v        - Toggle vertical split mode",
-		"-        - Toggle horizontal split mode",
-		"D        - Delete buffer",
-		"R        - Reset buffer frecency score",
 		"q/Esc    - Close switcher",
 		"g?       - Show this help",
+    -- stylua: ignore start 
+		config.select_key ..                "     - Select buffer               ",
+		config.split_commands.vertical ..   "        - Toggle vertical split mode  ",
+		config.split_commands.horizontal .. "        - Toggle horizontal split mode",
+		config.delete_key ..                "        - Delete buffer               ",
+		config.reset_key ..                 "        - Reset buffer frecency score ",
+		-- stylua: ignore end
 	}
 
 	local width = 40
@@ -219,7 +238,7 @@ local function show_help_window(main_win, config)
 	local buf = api.nvim_create_buf(false, true)
 	local win_opts = {
 		relative = "editor",
-		row = row,
+		row = row + 1,
 		col = col,
 		width = width,
 		height = height,
@@ -251,46 +270,13 @@ local function setup_keymaps(buf, win, state, config, key_map, mode)
 		api.nvim_echo({ { "" } }, false, {})
 	end
 
-	current_state = state
-	current_config = config
-
-	-- Handle buffer deletion
-	local function delete_buffer(buffer_id, switcher_win)
-		-- Store current window
-		local current_win = api.nvim_get_current_win()
-
-		-- Find a regular window to switch to temporarily
-		local main_win = nil
-		for _, win in ipairs(api.nvim_list_wins()) do
-			if win ~= switcher_win and api.nvim_win_get_config(win).relative == "" then
-				main_win = win
-				break
-			end
-		end
-
-		if main_win then
-			-- Switch to main window
-			api.nvim_set_current_win(main_win)
-			-- Delete the buffer
-			local success = pcall(api.nvim_buf_delete, buffer_id, { force = false })
-			-- Switch back to switcher window
-			api.nvim_set_current_win(current_win)
-
-			if not success then
-				vim.notify("Cannot delete buffer: Buffer is modified", vim.log.levels.WARN)
-				return false
-			end
-			return true
-		else
-			vim.notify("No regular window found to perform buffer deletion", vim.log.levels.WARN)
-			return false
-		end
-	end
-
 	-- Handle buffer selection
 	local function select_buffer(buffer_id)
 		clear_echo()
 		api.nvim_win_close(win, true)
+		-- Reset split mode flags
+		mode.vertical = false
+		mode.horizontal = false
 		-- If we stored a next_buffer (because we deleted the original), use it
 		if state.next_buffer then
 			api.nvim_set_current_buf(state.next_buffer)
@@ -302,27 +288,6 @@ local function setup_keymaps(buf, win, state, config, key_map, mode)
 				vim.cmd("split")
 			end
 			api.nvim_set_current_buf(buffer_id)
-		end
-	end
-
-	-- Handle buffer score reset
-	local function reset_buffer_score()
-		local cursor = api.nvim_win_get_cursor(win)
-		local line = cursor[1]
-		if line > 1 then
-			local key = config.keys[line - 1]
-			local buffer_id = key_map[key]
-			if buffer_id then
-				local file_path = api.nvim_buf_get_name(buffer_id)
-				local history = require("vite.history")
-				if history.reset_score(file_path, state) then
-					-- Force immediate refresh
-					vim.schedule(function()
-						local utils = require("vite.utils")
-						utils.refresh_switcher(state, config)
-					end)
-				end
-			end
 		end
 	end
 
@@ -345,7 +310,8 @@ local function setup_keymaps(buf, win, state, config, key_map, mode)
 			local buffers = scoring.get_sorted_buffers(state)
 			if line_num <= #buffers then
 				local buffer_to_delete = buffers[line_num].id
-				if delete_buffer(buffer_to_delete, win) then
+				local utils = require("vite.utils")
+				if utils.delete_buffer(buffer_to_delete, win) then
 					vim.schedule(function()
 						local new_buffers = scoring.get_sorted_buffers(state)
 						if #new_buffers == 0 then
@@ -359,7 +325,7 @@ local function setup_keymaps(buf, win, state, config, key_map, mode)
 				end
 			end
 		end,
-		["R"] = function()
+		[config.reset_key] = function()
 			local cursor = api.nvim_win_get_cursor(win)
 			local line_num = cursor[1] - 1
 			local buffers = scoring.get_sorted_buffers(state)
@@ -380,13 +346,29 @@ local function setup_keymaps(buf, win, state, config, key_map, mode)
 				end
 			end
 		end,
+		[config.select_key] = function()
+			local cursor = api.nvim_win_get_cursor(win)
+			local line_num = cursor[1] - 1
+			local buffers = scoring.get_sorted_buffers(state)
+			if line_num <= #buffers then
+				local buffer_id = buffers[line_num].id
+				clear_echo() -- Clear any echo message
+				api.nvim_win_close(win, true)
+				if mode.vertical then
+					vim.cmd("vsplit")
+				elseif mode.horizontal then
+					vim.cmd("split")
+				end
+				api.nvim_set_current_buf(buffer_id)
+			end
+		end,
 		[config.split_commands.vertical] = function()
 			mode.vertical = not mode.vertical
 			mode.horizontal = false
 			if mode.vertical then
 				api.nvim_echo({ { " VERTICAL ", "IncSearch" } }, false, {})
 			else
-				api.nvim_echo({ { "" } }, false, {})
+				clear_echo()
 			end
 		end,
 		[config.split_commands.horizontal] = function()
@@ -395,17 +377,20 @@ local function setup_keymaps(buf, win, state, config, key_map, mode)
 			if mode.horizontal then
 				api.nvim_echo({ { " HORIZONTAL ", "IncSearch" } }, false, {})
 			else
-				api.nvim_echo({ { "" } }, false, {})
+				clear_echo()
 			end
 		end,
+		["g?"] = function()
+			show_help_window(win, config)
+		end,
 		["q"] = function()
-			api.nvim_echo({ { "" } }, false, {})
+			clear_echo()
 			api.nvim_win_close(win, true)
 		end,
 		["<Esc>"] = function()
 			mode.vertical = false
 			mode.horizontal = false
-			api.nvim_echo({ { "" } }, false, {})
+			clear_echo()
 			api.nvim_win_close(win, true)
 		end,
 	}
@@ -426,6 +411,7 @@ local function setup_keymaps(buf, win, state, config, key_map, mode)
 			local key = config.keys[i]
 			api.nvim_buf_set_keymap(buf, "n", key, "", {
 				callback = function()
+					clear_echo()
 					api.nvim_win_close(win, true)
 					if mode.vertical then
 						vim.cmd("vsplit")
@@ -441,37 +427,90 @@ local function setup_keymaps(buf, win, state, config, key_map, mode)
 	end
 end
 
+local function setup_cursor_highlight()
+	-- Create invisible cursor highlight
+	vim.api.nvim_set_hl(0, "ViteCursor", { nocombine = true, blend = 100 })
+	-- Apply the invisible cursor
+	vim.opt.guicursor:append("a:ViteCursor/ViteCursor")
+end
+
+local function restore_cursor_highlight()
+	-- Clear our custom highlight
+	vim.cmd("highlight clear ViteCursor")
+	-- Remove our cursor setting
+	vim.schedule(function()
+		vim.opt.guicursor:remove("a:ViteCursor/ViteCursor")
+	end)
+end
+
 -- Main function to show buffer switcher
 function M.show_switcher(state, config)
 	state.original_buffer = api.nvim_get_current_buf()
 	local current_buffer = api.nvim_get_current_buf()
 	local buffers = scoring.get_sorted_buffers(state)
 	local buf, win = create_float_win(config)
+	local current_arrow_line = nil
 
+	-- Add arrow indicator at the start of each line
+	local ns_id = api.nvim_create_namespace("vite_arrow")
+	-- Hide cursor if configured
+	if config.ui.hide_cursor then
+		setup_cursor_highlight()
+	end
 	local mode = { vertical = false, horizontal = false }
 
-	-- Set up cursor movement constraint
+	-- Update arrow position when cursor moves
 	api.nvim_create_autocmd("CursorMoved", {
 		buffer = buf,
 		callback = function()
 			local cursor = api.nvim_win_get_cursor(win)
-			local fixed_col = #config.window.left_padding + 7
-			api.nvim_win_set_cursor(win, { cursor[1], fixed_col })
+			local line = cursor[1] - 1 -- 0-based line number
+
+			-- Clear all arrows
+			api.nvim_buf_clear_namespace(buf, ns_id, 0, -1)
+			-- Add arrow at current line
+			if line >= 0 then
+				api.nvim_buf_set_extmark(buf, ns_id, line, 0, {
+					virt_text = { { config.ui.arrow_icon or "→ ", "Special" } },
+					virt_text_pos = "overlay",
+					priority = 100,
+				})
+			end
+		end,
+	})
+	-- Restore cursor when leaving buffer
+	api.nvim_create_autocmd("BufLeave", {
+		buffer = buf,
+		desc = "Restore Cursor",
+		once = true,
+		callback = function()
+			restore_cursor_highlight()
 		end,
 	})
 
 	local key_map, buffer_list, current_line = display_buffers(buf, buffers, current_buffer, config)
 	setup_keymaps(buf, win, state, config, key_map, mode) -- Fixed argument order
 
-	-- Set initial cursor position
+	-- Set initial arrow position
 	if current_line then
 		vim.schedule(function()
 			if api.nvim_win_is_valid(win) then
-				local fixed_col = #config.window.left_padding + 7
-				api.nvim_win_set_cursor(win, { current_line, fixed_col })
+				api.nvim_win_set_cursor(win, { current_line, 3 }) -- Position after arrow
+				update_arrow(buf, nil, current_line, config)
+				current_arrow_line = current_line
 			end
 		end)
 	end
+	-- Cleanup when closing
+	api.nvim_create_autocmd("WinClosed", {
+		pattern = tostring(win),
+		callback = function()
+			if config.ui.hide_cursor then
+				api.nvim_set_option_value("guicursor", vim.o.guicursor, { scope = "global" })
+			end
+		end,
+		once = true,
+	})
 
 	return buf, win
 end

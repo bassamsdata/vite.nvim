@@ -38,15 +38,37 @@ function M.is_switcher_open(state)
 		and api.nvim_buf_is_valid(state.current_switcher.buf)
 end
 
--- Delete buffer safely
-function M.delete_buffer(buf_id)
-	-- Try to delete the buffer
-	local success = pcall(api.nvim_buf_delete, buf_id, { force = false })
-	if not success then
-		vim.notify("Cannot delete buffer: Buffer is modified", vim.log.levels.WARN)
+-- Handle buffer deletion
+function M.delete_buffer(buffer_id, switcher_win)
+	-- Store current window
+	local current_win = api.nvim_get_current_win()
+
+	-- Find a regular window to switch to temporarily
+	local main_win = nil
+	for _, win in ipairs(api.nvim_list_wins()) do
+		if win ~= switcher_win and api.nvim_win_get_config(win).relative == "" then
+			main_win = win
+			break
+		end
+	end
+
+	if main_win then
+		-- Switch to main window
+		api.nvim_set_current_win(main_win)
+		-- Delete the buffer
+		local success = pcall(api.nvim_buf_delete, buffer_id, { force = false })
+		-- Switch back to switcher window
+		api.nvim_set_current_win(current_win)
+
+		if not success then
+			vim.notify("Cannot delete buffer: Buffer is modified", vim.log.levels.WARN)
+			return false
+		end
+		return true
+	else
+		vim.notify("No regular window found to perform buffer deletion", vim.log.levels.WARN)
 		return false
 	end
-	return true
 end
 
 -- Refresh the switcher display

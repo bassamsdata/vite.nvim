@@ -1,40 +1,61 @@
 local M = {}
-
 local fn = vim.fn
 
--- Setup plugin directory structure
-local function ensure_directories()
-	local base_dir = fn.stdpath("data") .. "/vite"
-	local projects_dir = base_dir .. "/projects"
+local function measure(name, func)
+	local start = vim.uv.hrtime()
+	local result = { func() } -- Capture all return values in a table
+	local duration = (vim.uv.hrtime() - start) / 1000000
+	vim.notify(string.format("History: %s took %.2fms", name, duration))
+	return unpack(result) -- Return all values
+end
 
-	-- Create directories if they don't exist
-	for _, dir in ipairs({ base_dir, projects_dir }) do
-		if fn.isdirectory(dir) == 0 then
-			fn.mkdir(dir, "p")
-		end
-	end
-	return base_dir, projects_dir
+-- Get base directory path
+local function get_base_dir()
+	return fn.stdpath("data") .. "/vite"
 end
 
 -- Generate consistent hash for project path
 local function hash_path(path)
-	return fn.sha256(path):sub(1, 16)
+	local hash = 5381
+	for i = 1, #path do
+		hash = (hash * 33 + path:byte(i)) % 0x100000000
+	end
+	return string.format("%08x", hash)
 end
 
 -- Get project root and history file path
+-- Measure project root detection
+local path_cache = {}
 local function initialize_project_paths(state, config)
-	local base_dir, projects_dir = ensure_directories()
+	local cwd = fn.getcwd()
+
+	-- Use cached paths if available
+	if path_cache[cwd] then
+		state.current_project_root = path_cache[cwd].root
+		state.history_file_path = path_cache[cwd].history_path
+		return
+	end
+
+	-- Detect project root
 	state.current_project_root = vim.fs.root(0, config.project.markers)
 
+	-- Set history file path
+	local base_dir = get_base_dir()
 	if state.current_project_root then
 		local project_hash = hash_path(state.current_project_root)
-		state.history_file_path = string.format("%s/%s.json", projects_dir, project_hash)
+		state.history_file_path = string.format("%s/%s.json", base_dir, project_hash)
 	else
 		state.history_file_path = base_dir .. "/global.json"
 	end
+
+	-- Cache the result
+	path_cache[cwd] = {
+		root = state.current_project_root,
+		history_path = state.history_file_path,
+	}
 end
 
--- Load history from file
+-- Load history from file (only when needed)
 local function load_history_file(state)
 	if not state.history_file_path then
 		return
@@ -51,10 +72,7 @@ local function load_history_file(state)
 	if content and content ~= "" then
 		local ok, data = pcall(vim.json.decode, content)
 		if ok then
-			state.buffer_history = {}
-			for k, v in pairs(data) do
-				state.buffer_history[k] = v
-			end
+			state.buffer_history = data
 		end
 	end
 end
@@ -65,6 +83,11 @@ function M.save_to_file(state)
 		return
 	end
 
+	-- Ensure directory exists before saving
+	local base_dir = get_base_dir()
+	if fn.isdirectory(base_dir) == 0 then
+		fn.mkdir(base_dir, "p")
+	end
 	-- Create a temporary file path
 	local temp_file = state.history_file_path .. ".tmp"
 
@@ -111,8 +134,8 @@ end
 
 -- Cleanup old project histories
 function M.cleanup_old_histories(config)
-	local _, projects_dir = ensure_directories()
-	local files = fn.glob(projects_dir .. "/*.json", 0, 1)
+	local base_dir = get_base_dir()
+	local files = fn.glob(base_dir .. "/*.json", 0, 1)
 
 	if #files > config.project.max_histories then
 		-- Sort files by access time
